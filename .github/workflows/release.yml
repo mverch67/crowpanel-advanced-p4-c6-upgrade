@@ -38,9 +38,13 @@ jobs:
       - name: Build LittleFS image
         run: ./bin/buildfs.sh ${{ matrix.target }}
 
-      - name: Package artifacts and install script
+      - name: Package zip bundle
         run: |
           set -euo pipefail
+
+          RELEASE_TAG="${GITHUB_REF_NAME}"
+          C6_RELEASE_TAG="$(curl -fsSL https://api.github.com/repos/esphome/esp-hosted-firmware/releases/latest \
+            | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")"
 
           OUT_DIR="out/${{ matrix.target }}"
           mkdir -p "$OUT_DIR"
@@ -114,11 +118,20 @@ jobs:
 
           chmod +x "$OUT_DIR/install.sh"
 
+          SAFE_RELEASE_TAG="$(printf '%s' "$RELEASE_TAG" | tr '/ ' '__')"
+          SAFE_C6_RELEASE_TAG="$(printf '%s' "$C6_RELEASE_TAG" | tr '/ ' '__')"
+          ZIP_NAME="${{ matrix.target }}_${SAFE_RELEASE_TAG}_c6-${SAFE_C6_RELEASE_TAG}.zip"
+
+          (
+            cd "$OUT_DIR"
+            zip -q -r "../$ZIP_NAME" .
+          )
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}-artifacts
-          path: out/${{ matrix.target }}
+          name: ${{ matrix.target }}-bundle
+          path: out/*.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
@@ -139,8 +152,18 @@ jobs:
           set -euo pipefail
 
           RELEASE_TAG="${GITHUB_REF_NAME}"
-          C6_RELEASE_TAG="$(curl -fsSL https://api.github.com/repos/esphome/esp-hosted-firmware/releases/latest \
-            | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")"
+          FIRST_ARCHIVE="$(find release-assets -type f -name '*.zip' | sort | head -n1)"
+          if [[ -z "$FIRST_ARCHIVE" ]]; then
+            echo "ERROR: no zip archives found in release-assets"
+            exit 1
+          fi
+
+          ARCHIVE_BASENAME="$(basename "$FIRST_ARCHIVE")"
+          C6_RELEASE_TAG="$(printf '%s' "$ARCHIVE_BASENAME" | sed -n 's/.*_c6-\(.*\)\.zip/\1/p')"
+          if [[ -z "$C6_RELEASE_TAG" ]]; then
+            echo "ERROR: could not extract C6 release tag from archive name: $ARCHIVE_BASENAME"
+            exit 1
+          fi
 
           export RELEASE_TAG
           export C6_RELEASE_TAG
@@ -161,4 +184,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: release-notes.md
-          files: release-assets/**/*
+          files: release-assets/**/*.zip
