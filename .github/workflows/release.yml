@@ -46,14 +46,68 @@ jobs:
           C6_RELEASE_TAG="$(curl -fsSL https://api.github.com/repos/esphome/esp-hosted-firmware/releases/latest \
             | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")"
 
+          BUILD_DIR=".pio/build/${{ matrix.target }}"
+          FLASHER_ARGS_JSON="$BUILD_DIR/flasher_args.json"
+          if [[ ! -f "$FLASHER_ARGS_JSON" ]]; then
+            echo "ERROR: missing $FLASHER_ARGS_JSON"
+            exit 1
+          fi
+
+          eval "$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = Path('.pio/build/${{ matrix.target }}/flasher_args.json')
+          data = json.loads(p.read_text(encoding='utf-8'))
+
+          def q(s: str) -> str:
+              return s.replace('"', '\\"')
+
+          app_file = data['app']['file']
+          app_off = data['app']['offset']
+          boot_file = data['bootloader']['file']
+          boot_off = data['bootloader']['offset']
+          part_file = data['partition-table']['file']
+          part_off = data['partition-table']['offset']
+          ota_file = data['otadata']['file']
+          ota_off = data['otadata']['offset']
+
+          mode = data['flash_settings']['flash_mode']
+          freq = data['flash_settings']['flash_freq']
+          size = data['flash_settings']['flash_size']
+
+          print(f'APP_FILE=\"{q(app_file)}\"')
+          print(f'APP_OFFSET=\"{q(app_off)}\"')
+          print(f'BOOT_FILE=\"{q(boot_file)}\"')
+          print(f'BOOT_OFFSET=\"{q(boot_off)}\"')
+          print(f'PART_FILE=\"{q(part_file)}\"')
+          print(f'PART_OFFSET=\"{q(part_off)}\"')
+          print(f'OTADATA_FILE=\"{q(ota_file)}\"')
+          print(f'OTADATA_OFFSET=\"{q(ota_off)}\"')
+          print(f'FLASH_MODE=\"{q(mode)}\"')
+          print(f'FLASH_FREQ=\"{q(freq)}\"')
+          print(f'FLASH_SIZE=\"{q(size)}\"')
+          PY
+          )"
+
+          STORAGE_OFFSET="$(awk -F, '/^storage[[:space:]]*,/ {gsub(/[[:space:]]+/,"",$4); print $4; exit}' partitions.csv)"
+          if [[ -z "$STORAGE_OFFSET" ]]; then
+            echo "ERROR: could not determine storage offset from partitions.csv"
+            exit 1
+          fi
+
           OUT_DIR="out/${{ matrix.target }}"
           mkdir -p "$OUT_DIR"
 
-          cp .pio/build/${{ matrix.target }}/firmware.bin "$OUT_DIR/"
-          cp .pio/build/${{ matrix.target }}/bootloader.bin "$OUT_DIR/"
-          cp .pio/build/${{ matrix.target }}/partitions.bin "$OUT_DIR/"
-          cp .pio/build/${{ matrix.target }}/littlefs.bin "$OUT_DIR/"
-          cp data/network_adapter_esp32c6.bin "$OUT_DIR/"
+          cp "$BUILD_DIR/$APP_FILE" "$OUT_DIR/firmware.bin"
+          cp "$BUILD_DIR/$BOOT_FILE" "$OUT_DIR/bootloader.bin"
+          cp "$BUILD_DIR/$PART_FILE" "$OUT_DIR/partitions.bin"
+          # Keep release artifacts toolchain-agnostic: generate the standard blank OTADATA image.
+          python3 - <<'PY'
+          from pathlib import Path
+          Path('out/${{ matrix.target }}/ota_data_initial.bin').write_bytes(b'\xff' * 0x2000)
+          PY
+          cp "$BUILD_DIR/littlefs.bin" "$OUT_DIR/littlefs.bin"
 
           cat > "$OUT_DIR/install.sh" <<'EOF'
           #!/usr/bin/env bash
@@ -63,7 +117,7 @@ jobs:
 
           usage() {
             echo "Usage: $0 <serial_port> [baud_rate]"
-            echo "Example: $0 /dev/ttyACM0 921600"
+            echo "Example: $0 /dev/ttyUSB0 921600"
           }
 
           if [[ $# -lt 1 ]]; then
@@ -74,10 +128,19 @@ jobs:
           PORT="$1"
           BAUD="${2:-921600}"
 
-          if command -v esptool.py >/dev/null 2>&1; then
-            ESPTOOL=(esptool.py)
-          elif command -v esptool >/dev/null 2>&1; then
+          FLASH_MODE="__FLASH_MODE__"
+          FLASH_FREQ="__FLASH_FREQ__"
+          FLASH_SIZE="__FLASH_SIZE__"
+          BOOT_OFFSET="__BOOT_OFFSET__"
+          PART_OFFSET="__PART_OFFSET__"
+          OTADATA_OFFSET="__OTADATA_OFFSET__"
+          APP_OFFSET="__APP_OFFSET__"
+          STORAGE_OFFSET="__STORAGE_OFFSET__"
+
+          if command -v esptool >/dev/null 2>&1; then
             ESPTOOL=(esptool)
+          elif command -v esptool.py >/dev/null 2>&1; then
+            ESPTOOL=(esptool.py)
           else
             ESPTOOL=(python3 -m esptool)
           fi
@@ -85,9 +148,9 @@ jobs:
           REQUIRED=(
             bootloader.bin
             partitions.bin
+            ota_data_initial.bin
             firmware.bin
             littlefs.bin
-            network_adapter_esp32c6.bin
           )
 
           for f in "${REQUIRED[@]}"; do
@@ -101,20 +164,29 @@ jobs:
             --chip esp32p4 \
             --port "$PORT" \
             --baud "$BAUD" \
-            --before default_reset \
-            --after hard_reset \
-            write_flash \
-            --flash_mode qio \
-            --flash_freq 80m \
-            --flash_size 16MB \
-            0x0000 bootloader.bin \
-            0x8000 partitions.bin \
-            0x10000 firmware.bin \
-            0x410000 littlefs.bin \
-            0x5F0000 network_adapter_esp32c6.bin
+            --before default-reset \
+            --after hard-reset \
+            write-flash \
+            --flash-mode "$FLASH_MODE" \
+            --flash-freq "$FLASH_FREQ" \
+            --flash-size "$FLASH_SIZE" \
+            "$BOOT_OFFSET" bootloader.bin \
+            "$PART_OFFSET" partitions.bin \
+            "$OTADATA_OFFSET" ota_data_initial.bin \
+            "$APP_OFFSET" firmware.bin \
+            "$STORAGE_OFFSET" littlefs.bin
 
           echo "Flash completed successfully."
           EOF
+
+          sed -i "s|__FLASH_MODE__|$FLASH_MODE|g" "$OUT_DIR/install.sh"
+          sed -i "s|__FLASH_FREQ__|$FLASH_FREQ|g" "$OUT_DIR/install.sh"
+          sed -i "s|__FLASH_SIZE__|$FLASH_SIZE|g" "$OUT_DIR/install.sh"
+          sed -i "s|__BOOT_OFFSET__|$BOOT_OFFSET|g" "$OUT_DIR/install.sh"
+          sed -i "s|__PART_OFFSET__|$PART_OFFSET|g" "$OUT_DIR/install.sh"
+          sed -i "s|__OTADATA_OFFSET__|$OTADATA_OFFSET|g" "$OUT_DIR/install.sh"
+          sed -i "s|__APP_OFFSET__|$APP_OFFSET|g" "$OUT_DIR/install.sh"
+          sed -i "s|__STORAGE_OFFSET__|$STORAGE_OFFSET|g" "$OUT_DIR/install.sh"
 
           chmod +x "$OUT_DIR/install.sh"
 
