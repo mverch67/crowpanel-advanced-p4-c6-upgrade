@@ -47,61 +47,28 @@ jobs:
             | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")"
 
           BUILD_DIR=".pio/build/${{ matrix.target }}"
-          FLASHER_ARGS_JSON="$BUILD_DIR/flasher_args.json"
-          if [[ ! -f "$FLASHER_ARGS_JSON" ]]; then
-            echo "ERROR: missing $FLASHER_ARGS_JSON"
+          APP_BIN_NAME="${GITHUB_REPOSITORY##*/}.bin"
+          APP_BIN_PATH="$BUILD_DIR/$APP_BIN_NAME"
+          if [[ ! -f "$APP_BIN_PATH" ]]; then
+            echo "ERROR: missing app binary $APP_BIN_PATH"
             exit 1
           fi
 
-          eval "$(python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          p = Path('.pio/build/${{ matrix.target }}/flasher_args.json')
-          data = json.loads(p.read_text(encoding='utf-8'))
-
-          def q(s: str) -> str:
-              return s.replace('"', '\\"')
-
-          app_file = data['app']['file']
-          app_off = data['app']['offset']
-          boot_file = data['bootloader']['file']
-          boot_off = data['bootloader']['offset']
-          part_file = data['partition-table']['file']
-          part_off = data['partition-table']['offset']
-          ota_file = data['otadata']['file']
-          ota_off = data['otadata']['offset']
-
-          mode = data['flash_settings']['flash_mode']
-          freq = data['flash_settings']['flash_freq']
-          size = data['flash_settings']['flash_size']
-
-          print(f'APP_FILE=\"{q(app_file)}\"')
-          print(f'APP_OFFSET=\"{q(app_off)}\"')
-          print(f'BOOT_FILE=\"{q(boot_file)}\"')
-          print(f'BOOT_OFFSET=\"{q(boot_off)}\"')
-          print(f'PART_FILE=\"{q(part_file)}\"')
-          print(f'PART_OFFSET=\"{q(part_off)}\"')
-          print(f'OTADATA_FILE=\"{q(ota_file)}\"')
-          print(f'OTADATA_OFFSET=\"{q(ota_off)}\"')
-          print(f'FLASH_MODE=\"{q(mode)}\"')
-          print(f'FLASH_FREQ=\"{q(freq)}\"')
-          print(f'FLASH_SIZE=\"{q(size)}\"')
-          PY
-          )"
-
-          STORAGE_OFFSET="$(awk -F, '/^storage[[:space:]]*,/ {gsub(/[[:space:]]+/,"",$4); print $4; exit}' partitions.csv)"
-          if [[ -z "$STORAGE_OFFSET" ]]; then
-            echo "ERROR: could not determine storage offset from partitions.csv"
-            exit 1
-          fi
+          FLASH_MODE="dio"
+          FLASH_FREQ="80m"
+          FLASH_SIZE="16MB"
+          BOOT_OFFSET="0x2000"
+          PART_OFFSET="0x8000"
+          OTADATA_OFFSET="0xD000"
+          APP_OFFSET="0x10000"
+          STORAGE_OFFSET="0x410000"
 
           OUT_DIR="out/${{ matrix.target }}"
           mkdir -p "$OUT_DIR"
 
-          cp "$BUILD_DIR/$APP_FILE" "$OUT_DIR/firmware.bin"
-          cp "$BUILD_DIR/$BOOT_FILE" "$OUT_DIR/bootloader.bin"
-          cp "$BUILD_DIR/$PART_FILE" "$OUT_DIR/partitions.bin"
+          cp "$APP_BIN_PATH" "$OUT_DIR/firmware.bin"
+          cp "$BUILD_DIR/bootloader/bootloader.bin" "$OUT_DIR/bootloader.bin"
+          cp "$BUILD_DIR/partition_table/partition-table.bin" "$OUT_DIR/partitions.bin"
           # Keep release artifacts toolchain-agnostic: generate the standard blank OTADATA image.
           python3 - <<'PY'
           from pathlib import Path
