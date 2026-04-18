@@ -47,38 +47,26 @@ jobs:
             | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")"
 
           BUILD_DIR=".pio/build/${{ matrix.target }}"
-          APP_BIN_NAME="${GITHUB_REPOSITORY##*/}.bin"
-          APP_BIN_PATH="$BUILD_DIR/$APP_BIN_NAME"
-          if [[ ! -f "$APP_BIN_PATH" ]]; then
-            echo "ERROR: missing app binary $APP_BIN_PATH"
+          FACTORY_BIN_PATH="$BUILD_DIR/firmware.factory.bin"
+          if [[ ! -f "$FACTORY_BIN_PATH" ]]; then
+            echo "ERROR: factory binary not found at $FACTORY_BIN_PATH"
             exit 1
           fi
 
           FLASH_MODE="dio"
           FLASH_FREQ="80m"
           FLASH_SIZE="16MB"
-          BOOT_OFFSET="0x2000"
-          PART_OFFSET="0x8000"
-          OTADATA_OFFSET="0xD000"
-          APP_OFFSET="0x10000"
           STORAGE_OFFSET="0x410000"
 
           OUT_DIR="out/${{ matrix.target }}"
           mkdir -p "$OUT_DIR"
 
-          cp "$APP_BIN_PATH" "$OUT_DIR/firmware.bin"
-          cp "$BUILD_DIR/bootloader/bootloader.bin" "$OUT_DIR/bootloader.bin"
-          cp "$BUILD_DIR/partition_table/partition-table.bin" "$OUT_DIR/partitions.bin"
-          # Keep release artifacts toolchain-agnostic: generate the standard blank OTADATA image.
-          python3 - <<'PY'
-          from pathlib import Path
-          Path('out/${{ matrix.target }}/ota_data_initial.bin').write_bytes(b'\xff' * 0x2000)
-          PY
+          cp "$FACTORY_BIN_PATH" "$OUT_DIR/firmware.factory.bin"
           cp "$BUILD_DIR/littlefs.bin" "$OUT_DIR/littlefs.bin"
 
           cat > "$OUT_DIR/install.sh" <<'EOF'
           #!/usr/bin/env bash
-          # Flash all release artifacts for CrowPanel ESP32-P4.
+          # Flash release artifacts for CrowPanel ESP32-P4.
 
           set -euo pipefail
 
@@ -98,10 +86,6 @@ jobs:
           FLASH_MODE="__FLASH_MODE__"
           FLASH_FREQ="__FLASH_FREQ__"
           FLASH_SIZE="__FLASH_SIZE__"
-          BOOT_OFFSET="__BOOT_OFFSET__"
-          PART_OFFSET="__PART_OFFSET__"
-          OTADATA_OFFSET="__OTADATA_OFFSET__"
-          APP_OFFSET="__APP_OFFSET__"
           STORAGE_OFFSET="__STORAGE_OFFSET__"
 
           if command -v esptool >/dev/null 2>&1; then
@@ -113,10 +97,7 @@ jobs:
           fi
 
           REQUIRED=(
-            bootloader.bin
-            partitions.bin
-            ota_data_initial.bin
-            firmware.bin
+            firmware.factory.bin
             littlefs.bin
           )
 
@@ -137,10 +118,7 @@ jobs:
             --flash-mode "$FLASH_MODE" \
             --flash-freq "$FLASH_FREQ" \
             --flash-size "$FLASH_SIZE" \
-            "$BOOT_OFFSET" bootloader.bin \
-            "$PART_OFFSET" partitions.bin \
-            "$OTADATA_OFFSET" ota_data_initial.bin \
-            "$APP_OFFSET" firmware.bin \
+            0x0 firmware.factory.bin \
             "$STORAGE_OFFSET" littlefs.bin
 
           echo "Flash completed successfully."
@@ -149,10 +127,6 @@ jobs:
           sed -i "s|__FLASH_MODE__|$FLASH_MODE|g" "$OUT_DIR/install.sh"
           sed -i "s|__FLASH_FREQ__|$FLASH_FREQ|g" "$OUT_DIR/install.sh"
           sed -i "s|__FLASH_SIZE__|$FLASH_SIZE|g" "$OUT_DIR/install.sh"
-          sed -i "s|__BOOT_OFFSET__|$BOOT_OFFSET|g" "$OUT_DIR/install.sh"
-          sed -i "s|__PART_OFFSET__|$PART_OFFSET|g" "$OUT_DIR/install.sh"
-          sed -i "s|__OTADATA_OFFSET__|$OTADATA_OFFSET|g" "$OUT_DIR/install.sh"
-          sed -i "s|__APP_OFFSET__|$APP_OFFSET|g" "$OUT_DIR/install.sh"
           sed -i "s|__STORAGE_OFFSET__|$STORAGE_OFFSET|g" "$OUT_DIR/install.sh"
 
           chmod +x "$OUT_DIR/install.sh"
